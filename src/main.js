@@ -21,7 +21,11 @@ function render() {
 
 function showPortal() {
   const frame = document.querySelector("#portal-frame");
-  frame.src = PORTAL_URL;
+  // Cache-bust: the app window's WebView data store persists across
+  // launches (unlike a fresh browser tab), so a stale cached response -
+  // e.g. a transient 404 caught mid-restart during dev-mode iteration -
+  // could otherwise keep being served instead of a fresh request.
+  frame.src = `${PORTAL_URL}/?_t=${Date.now()}`;
   document.body.classList.add("portal-ready");
 }
 
