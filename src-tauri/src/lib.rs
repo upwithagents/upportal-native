@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
@@ -14,6 +15,15 @@ const PORTAL_URL: &str = "http://localhost:3000";
 const DEV_PATH_PREFIX: &str = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin";
 
 struct OrchestratorState(Mutex<Option<Child>>);
+
+// The orchestrator can emit its manifest and early per-app ready events
+// before the frontend has even finished loading and registered its event
+// listener - Tauri doesn't replay missed events to a late listener. Keep
+// the latest known snapshot here so the frontend can pull current state
+// on load (via the `get_status` command below) instead of relying solely
+// on a live-only event stream that can race against page load.
+#[derive(Default)]
+struct StatusSnapshot(Mutex<HashMap<String, Value>>);
 
 fn spawn_orchestrator(app: &AppHandle) {
     let path = format!(
@@ -44,6 +54,16 @@ fn spawn_orchestrator(app: &AppHandle) {
         for line in reader.lines().map_while(Result::ok) {
             if let Some(json_str) = line.strip_prefix("@@STATUS@@") {
                 if let Ok(payload) = serde_json::from_str::<Value>(json_str) {
+                    let key = payload
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .filter(|t| *t == "manifest")
+                        .map(|_| "manifest".to_string())
+                        .or_else(|| payload.get("slug").and_then(|v| v.as_str()).map(String::from));
+                    if let Some(key) = key {
+                        let snapshot: State<StatusSnapshot> = app_handle.state();
+                        snapshot.0.lock().unwrap().insert(key, payload.clone());
+                    }
                     let _ = app_handle.emit("app-status", payload);
                 }
             }
@@ -52,6 +72,11 @@ fn spawn_orchestrator(app: &AppHandle) {
 
     let state: State<OrchestratorState> = app.state();
     *state.0.lock().unwrap() = Some(child);
+}
+
+#[tauri::command]
+fn get_status(snapshot: State<StatusSnapshot>) -> Vec<Value> {
+    snapshot.0.lock().unwrap().values().cloned().collect()
 }
 
 // Sends SIGTERM to the orchestrator's whole process group (not just its
@@ -72,6 +97,8 @@ fn kill_orchestrator(app: &AppHandle) {
 
 fn restart(app: &AppHandle) {
     kill_orchestrator(app);
+    let snapshot: State<StatusSnapshot> = app.state();
+    snapshot.0.lock().unwrap().clear();
     let _ = app.emit("restarting", ());
     let handle = app.clone();
     std::thread::spawn(move || {
@@ -84,6 +111,8 @@ fn restart(app: &AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .manage(OrchestratorState(Mutex::new(None)))
+        .manage(StatusSnapshot::default())
+        .invoke_handler(tauri::generate_handler![get_status])
         .setup(|app| {
             let handle = app.handle().clone();
             spawn_orchestrator(&handle);

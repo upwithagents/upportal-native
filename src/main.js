@@ -1,4 +1,5 @@
 const { listen } = window.__TAURI__.event;
+const { invoke } = window.__TAURI__.core;
 
 const PORTAL_SLUG = "portal";
 const PORTAL_URL = "http://localhost:3000";
@@ -50,10 +51,26 @@ function handleStatus(payload) {
 }
 
 window.addEventListener("DOMContentLoaded", () => {
+  // Register listeners before pulling the snapshot below, so nothing
+  // that arrives in between is missed.
   listen("app-status", (event) => handleStatus(event.payload));
   listen("restarting", () => {
     for (const info of apps.values()) info.state = "pending";
     render();
     showBootScreen();
+  });
+
+  // The orchestrator can emit its manifest and early ready events before
+  // this page has finished loading and registered the listeners above -
+  // Tauri doesn't replay missed events. Pull current state explicitly to
+  // catch up on anything already missed. HashMap iteration order on the
+  // Rust side isn't guaranteed, so apply the manifest first regardless of
+  // array order, then the rest.
+  invoke("get_status").then((payloads) => {
+    const manifest = payloads.find((p) => p.type === "manifest");
+    if (manifest) handleStatus(manifest);
+    for (const payload of payloads) {
+      if (payload.type !== "manifest") handleStatus(payload);
+    }
   });
 });
