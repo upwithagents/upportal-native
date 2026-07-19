@@ -25,18 +25,31 @@ struct OrchestratorState(Mutex<Option<Child>>);
 #[derive(Default)]
 struct StatusSnapshot(Mutex<HashMap<String, Value>>);
 
+// Same "can race page load" problem as StatusSnapshot above, but for the
+// orchestrator-log diagnostic lines - an early spawn failure can fire
+// before the frontend has loaded far enough to call listen(), so it needs
+// to be buffered and pulled the same way, not just emitted live.
+#[derive(Default)]
+struct LogBuffer(Mutex<Vec<String>>);
+
+fn log_line(app: &AppHandle, message: String) {
+    let buffer: State<LogBuffer> = app.state();
+    buffer.0.lock().unwrap().push(message.clone());
+    let _ = app.emit("orchestrator-log", message);
+}
+
 fn spawn_orchestrator(app: &AppHandle) {
     let path = format!(
         "{}:{}",
         DEV_PATH_PREFIX,
         std::env::var("PATH").unwrap_or_default()
     );
-    let mut child = Command::new("pnpm")
+    let mut child = match Command::new("pnpm")
         .arg("dev")
         .current_dir(PORTAL_DIR)
         .env("PATH", path)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         // pnpm -> tsx's CLI wrapper -> the actual orchestrator script is a
         // 3-layer chain, and none of those layers reliably forward signals
         // to their child. Put the whole chain in its own process group (id
@@ -45,7 +58,13 @@ fn spawn_orchestrator(app: &AppHandle) {
         // wrapper layer to relay it.
         .process_group(0)
         .spawn()
-        .expect("failed to spawn orchestrator");
+    {
+        Ok(child) => child,
+        Err(e) => {
+            log_line(app, format!("failed to spawn pnpm: {e}"));
+            return;
+        }
+    };
 
     let stdout = child.stdout.take().expect("orchestrator has no stdout");
     let app_handle = app.clone();
@@ -70,6 +89,44 @@ fn spawn_orchestrator(app: &AppHandle) {
         }
     });
 
+    // Previously discarded entirely (Stdio::null()) - if the orchestrator
+    // fails immediately (missing dependency, bad env, etc.) it prints to
+    // stderr and produces zero stdout, so this was the one place any real
+    // failure reason would actually appear. Forward it as visible
+    // diagnostics instead of silently losing it.
+    let stderr = child.stderr.take().expect("orchestrator has no stderr");
+    let app_handle_err = app.clone();
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().map_while(Result::ok) {
+            log_line(&app_handle_err, format!("[stderr] {line}"));
+        }
+    });
+
+    let pid = child.id();
+    let app_handle_exit = app.clone();
+    std::thread::spawn(move || {
+        // Best-effort: poll for the process's own exit rather than waiting
+        // on the Child directly, since ownership of `child` moves into
+        // OrchestratorState right after this.
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let alive = Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !alive {
+                log_line(
+                    &app_handle_exit,
+                    format!("orchestrator process {pid} is no longer running"),
+                );
+                break;
+            }
+        }
+    });
+
     let state: State<OrchestratorState> = app.state();
     *state.0.lock().unwrap() = Some(child);
 }
@@ -77,6 +134,11 @@ fn spawn_orchestrator(app: &AppHandle) {
 #[tauri::command]
 fn get_status(snapshot: State<StatusSnapshot>) -> Vec<Value> {
     snapshot.0.lock().unwrap().values().cloned().collect()
+}
+
+#[tauri::command]
+fn get_log(buffer: State<LogBuffer>) -> Vec<String> {
+    buffer.0.lock().unwrap().clone()
 }
 
 // Sends SIGTERM to the orchestrator's whole process group (not just its
@@ -99,6 +161,8 @@ fn restart(app: &AppHandle) {
     kill_orchestrator(app);
     let snapshot: State<StatusSnapshot> = app.state();
     snapshot.0.lock().unwrap().clear();
+    let log_buffer: State<LogBuffer> = app.state();
+    log_buffer.0.lock().unwrap().clear();
     let _ = app.emit("restarting", ());
     let handle = app.clone();
     std::thread::spawn(move || {
@@ -112,7 +176,8 @@ pub fn run() {
     tauri::Builder::default()
         .manage(OrchestratorState(Mutex::new(None)))
         .manage(StatusSnapshot::default())
-        .invoke_handler(tauri::generate_handler![get_status])
+        .manage(LogBuffer::default())
+        .invoke_handler(tauri::generate_handler![get_status, get_log])
         .setup(|app| {
             let handle = app.handle().clone();
             spawn_orchestrator(&handle);

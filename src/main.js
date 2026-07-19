@@ -83,6 +83,17 @@ window.addEventListener("DOMContentLoaded", () => {
     render();
     showBootScreen();
   }).catch((err) => log(`listen(restarting) failed: ${JSON.stringify(err)}`));
+  listen("orchestrator-log", (event) => log(`[orchestrator] ${event.payload}`)).catch((err) =>
+    log(`listen(orchestrator-log) failed: ${JSON.stringify(err)}`),
+  );
+
+  // Same buffered-then-live pattern as get_status below: an early spawn
+  // failure can log before this page is ready to listen for it live.
+  invoke("get_log")
+    .then((lines) => {
+      for (const line of lines) log(`[orchestrator] ${line}`);
+    })
+    .catch((err) => log(`get_log FAILED: ${JSON.stringify(err)}`));
 
   // The orchestrator can emit its manifest and early ready events before
   // this page has finished loading and registered the listeners above -
