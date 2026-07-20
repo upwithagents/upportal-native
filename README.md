@@ -1,6 +1,11 @@
-# Tauri + Vanilla
+<img src="docs/icon.svg" width="56" align="left" alt="" />
 
-This template should help get you started developing with Tauri in vanilla HTML, CSS and Javascript.
+# upportal-native
+
+Tauri desktop shell for `upwithagents-portal` — wraps the portal as a
+native app rather than a browser tab.
+
+<br clear="left"/>
 
 ## Recommended IDE Setup
 
