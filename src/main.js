@@ -42,15 +42,21 @@ function render() {
 
 function showPortal() {
   const frame = document.querySelector("#portal-frame");
-  // Wait for the iframe to actually finish loading before swapping away
-  // from the boot screen - the orchestrator's "ready" event only means the
-  // dev server accepted a connection, not that the page has rendered, so
-  // switching immediately left a blank/gray gap while the portal compiled
-  // and painted.
+  // Wait for the iframe to actually finish loading before fading away the
+  // boot screen - the orchestrator's "ready" event only means the dev
+  // server accepted a connection, not that the page has rendered. The
+  // 'load' event itself can also fire a frame or two before the loaded
+  // page is actually composited, so wait a couple of animation frames
+  // past it too before starting the fade - otherwise the reveal can catch
+  // the window's bare background for an instant.
   frame.addEventListener(
     "load",
     () => {
-      document.body.classList.add("portal-ready");
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          document.body.classList.add("portal-ready");
+        });
+      });
     },
     { once: true },
   );
