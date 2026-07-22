@@ -12,7 +12,8 @@
       {
         "title": "UpWithAgents",
         "width": 1200,
-        "height": 800
+        "height": 800,
+        "backgroundColor": "#F6F6F6"
       }
     ],
     "security": {
